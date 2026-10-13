@@ -29,6 +29,8 @@ export type SemanticPipelineOptions = {
   chunkChars?: number;
   temperature?: number;
   fetchImpl?: typeof fetch;
+  diagnostic?: (type: string, detail: Record<string, unknown>) => Promise<void>;
+  renderTimeoutMs?: number;
 };
 
 export type SemanticPipelineResult = {
@@ -54,6 +56,7 @@ const SYSTEM_PROMPT = `你是中英科技论文翻译与数学公式校订器。
 数学语义优先：从矩阵乘法、张量收缩、范数、导数、转置和定义推断向量、矩阵、张量的粗体；标量参数、分量、坐标和不变量不要加粗。
 识别正文中丢失数学分隔符的行内公式，并返回 inline_formula_candidates。
 不得删除、翻译、重排或新增 [[IMG###]]、[[TABLE###]]、[[MATH###]] 占位符。公式编号必须保留。
+图片占位符后以 Fig.、Figure 或“图”开头的图注必须紧随该图片，完整翻译并保持为一个段落，不得拆散或移入正文。
 输出必须严格包含四个区块：BEGIN_MARKDOWN/END_MARKDOWN、BEGIN_FORMULA_REPAIRS/END_FORMULA_REPAIRS、BEGIN_INLINE_CANDIDATES/END_INLINE_CANDIDATES、BEGIN_NOTES/END_NOTES。`;
 
 function base64FromBytes(bytes: Uint8Array): string {
@@ -70,8 +73,15 @@ function jsonText(value: unknown): string {
 }
 
 export class SemanticPipeline {
-  private readonly options: Required<SemanticPipelineOptions>;
+  private readonly options: SemanticPipelineOptions & {
+    targetLanguage: string;
+    thinkingEffort: string;
+    chunkChars: number;
+    temperature: number;
+    fetchImpl: typeof fetch;
+  };
   private readonly fetchImpl: typeof fetch;
+  private requestNumber = 0;
 
   constructor(options: SemanticPipelineOptions) {
     this.options = {
@@ -79,6 +89,7 @@ export class SemanticPipeline {
       thinkingEffort: "medium",
       chunkChars: 13500,
       temperature: 0,
+      renderTimeoutMs: 10 * 60 * 1000,
       fetchImpl: options.fetchImpl || fetch,
       ...options,
     };
@@ -98,6 +109,10 @@ export class SemanticPipeline {
     const notes: string[] = [];
 
     for (let index = 0; index < chunks.length; index++) {
+      await this.record("translation.chunk", {
+        index: index + 1,
+        total: chunks.length,
+      });
       const chunk = chunks[index];
       const inventory = formulaInventoryForChunk(chunk, protectedDoc);
       const previous = index > 0 ? chunks[index - 1].slice(-1200) : "";
@@ -287,15 +302,63 @@ export class SemanticPipeline {
     renderServiceUrl: string,
   ): Promise<Uint8Array> {
     const url = `${renderServiceUrl.replace(/\/+$/, "")}/v1/render-markdown`;
-    const response = await this.fetchImpl(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, title, resourceDir }),
-    });
-    if (!response.ok) {
-      throw new Error(`render service HTTP ${response.status}`);
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      this.options.renderTimeoutMs,
+    );
+    try {
+      const response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markdown, title, resourceDir }),
+        signal: controller.signal,
+      });
+      const metadata = {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        mode: response.headers.get("x-render-mode"),
+        fallbackCount: response.headers.get("x-render-fallback-count"),
+        warningCount: response.headers.get("x-render-warning-count"),
+        missingGlyphCount: response.headers.get("x-render-missing-glyph-count"),
+        diagnosticsDir: decodeURIComponent(
+          response.headers.get("x-render-diagnostics-dir") || "",
+        ),
+      };
+      if (!response.ok) {
+        const raw = await response.text();
+        await this.record("render.response", { ...metadata, body: raw });
+        let detail = raw;
+        try {
+          detail = JSON.parse(raw)?.error || raw;
+        } catch {
+          // Keep non-JSON error responses as evidence too.
+        }
+        throw new Error(`render service HTTP ${response.status}: ${detail}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      await this.record("render.response", {
+        ...metadata,
+        bytes: bytes.length,
+        elapsedMs: Date.now() - started,
+      });
+      if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
+        throw new Error("渲染服务返回成功状态，但内容不是 PDF");
+      }
+      return bytes;
+    } catch (error) {
+      const message = controller.signal.aborted
+        ? `PDF 渲染超时（${this.options.renderTimeoutMs} ms）`
+        : String(error instanceof Error ? error.message : error);
+      await this.record("render.error", {
+        message,
+        elapsedMs: Date.now() - started,
+      });
+      throw new Error(message, { cause: error });
+    } finally {
+      clearTimeout(timer);
     }
-    return new Uint8Array(await response.arrayBuffer());
   }
 
   private buildChunkPrompt(
@@ -350,28 +413,63 @@ ${next}
   }
 
   private async chatRaw(payload: any): Promise<ChatResult> {
+    const number = ++this.requestNumber;
+    const started = Date.now();
     const body = JSON.stringify(payload);
-    const response = await this.fetchImpl(
-      `${this.options.apiUrl.replace(/\/+$/, "")}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.options.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body,
-      },
-    );
-    const raw = await response.text();
-    if (!response.ok) {
-      throw new Error(`AI API HTTP ${response.status}: ${raw.slice(0, 240)}`);
+    const loggedPayload = JSON.parse(body);
+    for (const message of loggedPayload.messages || []) {
+      if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.file?.file_data) part.file.file_data = "<PDF bytes omitted>";
+        }
+      }
     }
-    const json = JSON.parse(raw);
-    return {
-      text: json?.choices?.[0]?.message?.content || "",
-      usage: json?.usage || {},
-      requestBytes: body.length,
-      responseBytes: raw.length,
-    };
+    await this.record("ai.request", { number, payload: loggedPayload });
+    try {
+      const response = await this.fetchImpl(
+        `${this.options.apiUrl.replace(/\/+$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.options.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body,
+        },
+      );
+      const raw = await response.text();
+      await this.record("ai.response", {
+        number,
+        status: response.status,
+        elapsedMs: Date.now() - started,
+        requestBytes: new TextEncoder().encode(body).length,
+        responseBytes: new TextEncoder().encode(raw).length,
+        body: raw,
+      });
+      if (!response.ok) {
+        throw new Error(`AI API HTTP ${response.status}: ${raw.slice(0, 240)}`);
+      }
+      const json = JSON.parse(raw);
+      return {
+        text: json?.choices?.[0]?.message?.content || "",
+        usage: json?.usage || {},
+        requestBytes: new TextEncoder().encode(body).length,
+        responseBytes: new TextEncoder().encode(raw).length,
+      };
+    } catch (error) {
+      await this.record("ai.error", {
+        number,
+        elapsedMs: Date.now() - started,
+        message: String(error instanceof Error ? error.message : error),
+      });
+      throw error;
+    }
+  }
+
+  private async record(
+    type: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    await this.options.diagnostic?.(type, detail);
   }
 }

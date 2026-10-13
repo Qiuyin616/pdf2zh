@@ -42,4 +42,9 @@ jobs:
     steps:
       - name: Setup JS
         uses: zotero-plugin-dev/workflows/setup-js@main
+      - name: Test figure grouping, diagnostics and render compatibility
+        run: |
+          npm run test:figures
+          npm run test:diagnostics
+          npm run test:render
       - run: npm run test

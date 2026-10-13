@@ -55,4 +55,13 @@ describe("semantic repair placeholders", function () {
     assert.equal(missing.formulas.missing.length, 1);
     assert.equal(missing.tables.missing.length, 1);
   });
+
+  it("preserves the complete group layout marker through translation placeholders", function () {
+    const source =
+      "![](images/figure-03-2.png){.pdf2md-figure}\n\nFig. 2 | caption $x$.";
+    const doc = protectMarkdown(source);
+    assert.equal(doc.images[0], "![](images/figure-03-2.png){.pdf2md-figure}");
+    assert.notInclude(doc.text, ".pdf2md-figure");
+    assert.equal(restoreMarkdown(doc.text, doc, []), source);
+  });
 });

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { setTimeout, clearTimeout } from "node:timers";
 import { renderCompatible } from "./render-compatibility.mjs";
+import { prepareFigures, layoutFigureBlocks } from "./figure-layout.mjs";
 import {
   normalizeMathDocument,
   expandHtmlTables,
@@ -37,8 +38,9 @@ function readBody(req) {
   });
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, diagnostic = async () => {}) {
   return new Promise((resolve, reject) => {
+    const started = Date.now();
     const child = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -65,9 +67,20 @@ function run(command, args, cwd) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else
-        reject(new Error(stderr.slice(-4000) || `pandoc exited with ${code}`));
+      diagnostic("subprocess", {
+        command,
+        args,
+        code,
+        elapsedMs: Date.now() - started,
+        stdout,
+        stderr,
+      }).then(() => {
+        if (code === 0) resolve({ stdout, stderr });
+        else
+          reject(
+            new Error(stderr.slice(-4000) || `pandoc exited with ${code}`),
+          );
+      }, reject);
     });
   });
 }
@@ -81,10 +94,24 @@ async function render(payload) {
   const pdfPath = join(dir, "document.pdf");
   const headerPath = join(dir, "fallback-header.tex");
   const templatePath = join(dir, "math-template.tex");
+  let sequence = 0;
+  const diagnostic = async (type, detail) => {
+    await writeFile(
+      join(dir, `event-${String(++sequence).padStart(5, "0")}.json`),
+      JSON.stringify(
+        { time: new Date().toISOString(), type, ...detail },
+        null,
+        2,
+      ),
+    );
+  };
+  const execute = (command, args, cwd) => run(command, args, cwd, diagnostic);
   try {
+    await writeFile(join(dir, "input.json"), JSON.stringify(payload, null, 2));
+    await writeFile(join(dir, "source.md"), payload.markdown, "utf8");
     await writeFile(
       templatePath,
-      mathTemplate((await run(pandoc, ["-D", "latex"], dir)).stdout),
+      mathTemplate((await execute(pandoc, ["-D", "latex"], dir)).stdout),
       "utf8",
     );
     await writeFile(headerPath, mathPreamble, "utf8");
@@ -95,7 +122,7 @@ async function render(payload) {
       await writeFile(markdownPath, source, "utf8");
       return JSON.parse(
         (
-          await run(
+          await execute(
             pandoc,
             [markdownPath, "--from", format, "--to", "json"],
             dir,
@@ -117,7 +144,7 @@ async function render(payload) {
             empty.blocks = blocks;
             await writeFile(markdownPath, JSON.stringify(empty), "utf8");
             return (
-              await run(
+              await execute(
                 pandoc,
                 [markdownPath, "--from", "json", "--to", "html", "--mathjax"],
                 dir,
@@ -129,14 +156,17 @@ async function render(payload) {
     const result = await renderCompatible(payload.markdown, {
       parse,
       compile: async ({ markdown, document }) => {
-        const prepared = document || (await parse(markdown));
+        const prepared = layoutFigureBlocks(
+          document || (await parse(markdown)),
+        );
+        await diagnostic("compile.input", { document: prepared });
         await rm(pdfPath, { force: true });
         await writeFile(
           markdownPath,
           JSON.stringify(fitDisplayMath(prepared)),
           "utf8",
         );
-        const compiled = await run(
+        const compiled = await execute(
           pandoc,
           [
             markdownPath,
@@ -150,6 +180,8 @@ async function render(payload) {
             templatePath,
             "-V",
             "geometry:margin=1in",
+            "-V",
+            "pagestyle=plain",
             "--include-in-header",
             headerPath,
             "-o",
@@ -165,18 +197,71 @@ async function render(payload) {
         };
       },
     });
+    await writeFile(
+      join(dir, "status.json"),
+      JSON.stringify(
+        {
+          status: "completed",
+          mode: result.mode,
+          fallbackCount: result.fallbackCount,
+          warningCount: result.pdf.warningCount,
+          missingGlyphCount: result.pdf.missingGlyphCount,
+        },
+        null,
+        2,
+      ),
+    );
     return {
       ...result,
       pdf: result.pdf.data,
       warningCount: result.pdf.warningCount,
       missingGlyphCount: result.pdf.missingGlyphCount,
+      diagnosticsDir: dir,
     };
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+  } catch (error) {
+    await diagnostic("error", {
+      message: String(error.message || error),
+      stack: error.stack,
+    });
+    await writeFile(
+      join(dir, "status.json"),
+      JSON.stringify(
+        { status: "failed", error: String(error.message || error) },
+        null,
+        2,
+      ),
+    );
+    error.diagnosticsDir = dir;
+    throw error;
   }
 }
 
 const server = createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/health") {
+    try {
+      await run(pandoc, ["--version"], tmpdir());
+      await run("xelatex", ["--version"], tmpdir());
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({ status: "ok", diagnostics: true, figureLayout: true }),
+      );
+    } catch (error) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(error.message || error) }));
+    }
+    return;
+  }
+  if (req.method === "POST" && req.url === "/v1/prepare-figures") {
+    try {
+      const result = await prepareFigures(JSON.parse(await readBody(req)), run);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(error.message || error) }));
+    }
+    return;
+  }
   if (req.method !== "POST" || req.url !== "/v1/render-markdown") {
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
@@ -184,8 +269,14 @@ const server = createServer(async (req, res) => {
   }
   try {
     const payload = JSON.parse(await readBody(req));
-    const { pdf, mode, fallbackCount, warningCount, missingGlyphCount } =
-      await render(payload);
+    const {
+      pdf,
+      mode,
+      fallbackCount,
+      warningCount,
+      missingGlyphCount,
+      diagnosticsDir,
+    } = await render(payload);
     res.writeHead(200, {
       "content-type": "application/pdf",
       "content-length": pdf.length,
@@ -193,11 +284,26 @@ const server = createServer(async (req, res) => {
       "x-render-fallback-count": fallbackCount,
       "x-render-warning-count": warningCount,
       "x-render-missing-glyph-count": missingGlyphCount,
+      "x-render-diagnostics-dir": encodeURIComponent(diagnosticsDir),
     });
     res.end(pdf);
   } catch (error) {
-    res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: String(error?.message || error) }));
+    res.writeHead(500, {
+      "content-type": "application/json",
+      ...(error.diagnosticsDir
+        ? {
+            "x-render-diagnostics-dir": encodeURIComponent(
+              error.diagnosticsDir,
+            ),
+          }
+        : {}),
+    });
+    res.end(
+      JSON.stringify({
+        error: String(error?.message || error),
+        diagnosticsDir: error.diagnosticsDir,
+      }),
+    );
   }
 });
 

@@ -3,6 +3,12 @@
 # Finder launches do not necessarily inherit the terminal's PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/Library/TeX/texbin:${PATH:-/usr/bin:/bin}:/usr/sbin:/sbin"
 
+# Reuse Codex's local Poppler bundle when system Poppler is not installed.
+FIGURE_POPPLER="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/bin"
+if [ -x "$FIGURE_POPPLER/pdftoppm" ] && [ -x "$FIGURE_POPPLER/pdfinfo" ]; then
+  export PATH="$PATH:$FIGURE_POPPLER"
+fi
+
 pause_before_exit() {
   if [ -t 0 ]; then
     printf '\nPress Enter to close this window...'

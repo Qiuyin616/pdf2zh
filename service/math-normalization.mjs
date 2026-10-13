@@ -3,6 +3,7 @@
 export const mathPreamble = [
   "\\usepackage{mathtools,amssymb,bm,mathrsfs,graphicx}",
   "\\allowdisplaybreaks",
+  "\\setkeys{Gin}{width=0.8\\linewidth,height=0.4\\textheight,keepaspectratio}",
   "\\IfFontExistsTF{STIX Two Math}{\\newfontfamily{\\PDFtoMDMathGlyphFont}{STIX Two Math}}{\\newfontfamily{\\PDFtoMDMathGlyphFont}{texgyrepagella-math.otf}}",
   "\\providecommand{\\PDFtoMDUnicodeMath}[1]{\\text{\\PDFtoMDMathGlyphFont #1}}",
   "\\providecommand{\\PDFtoMDMathFit}[2]{\\begingroup\\setbox0=\\hbox{$\\displaystyle #2$}\\ifdim\\wd0>#1\\relax\\resizebox{#1}{!}{\\box0}\\else\\box0\\fi\\endgroup}",

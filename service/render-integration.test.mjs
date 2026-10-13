@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath, URL } from "node:url";
 import { TextDecoder } from "node:util";
+import { readFile, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 
 let child;
 let base;
@@ -67,8 +69,43 @@ async function render(markdown) {
   const bytes = new Uint8Array(await response.arrayBuffer());
   assert.equal(new TextDecoder().decode(bytes.subarray(0, 5)), "%PDF-");
   assert.ok(bytes.length > 1000);
+  const diagnostics = decodeURIComponent(
+    response.headers.get("x-render-diagnostics-dir"),
+  );
+  assert.ok(diagnostics.includes("zotero-semantic-render-"));
+  assert.equal(
+    JSON.parse(await readFile(join(diagnostics, "input.json"), "utf8"))
+      .markdown,
+    markdown,
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(diagnostics, "status.json"), "utf8")).status,
+    "completed",
+  );
+  const events = await readdir(diagnostics);
+  const records = await Promise.all(
+    events
+      .filter((name) => name.startsWith("event-"))
+      .map(async (name) =>
+        JSON.parse(await readFile(join(diagnostics, name), "utf8")),
+      ),
+  );
+  assert.ok(
+    records.some(
+      (record) =>
+        record.type === "subprocess" &&
+        Array.isArray(record.args) &&
+        typeof record.stderr === "string",
+    ),
+  );
+  await rm(diagnostics, { recursive: true, force: true });
   return response;
 }
+
+test("health verifies installed renderer dependencies", async () => {
+  const response = await fetch(base + "/health");
+  assert.equal(response.status, 200, await response.text());
+});
 
 test(
   "common paper formats must render normally, not pass by falling back",

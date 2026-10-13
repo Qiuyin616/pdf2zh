@@ -55,7 +55,7 @@ export type PlaceholderCheck = {
 
 const DISPLAY_MATH = /\$\$[\s\S]*?\$\$/g;
 const INLINE_MATH = /(?<!\\)\$(?!\$)[\s\S]*?(?<!\\)\$/g;
-const IMAGE = /!\[[^\]]*\]\([^)]+\)/g;
+const IMAGE = /!\[[^\]]*\]\([^)]+\)(?:[ \t]*\{[^}\n]*\})?/g;
 const TABLE = /<table>[\s\S]*?<\/table>/gi;
 
 function protectMatches(

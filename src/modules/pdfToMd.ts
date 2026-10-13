@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment, no-empty */
 // @ts-nocheck
-import { config } from "../../package.json";
+import { config, version } from "../../package.json";
 import { getPref, setPref } from "../utils/prefs";
 import { renderMarkdownToHTML, renderMarkdownZipToHTML } from "./renderHtml";
 import { SemanticPipeline } from "./semanticPipeline";
+import { TaskDiagnostics } from "./taskDiagnostics";
 
 export type OutputFormat = "markdown" | "html";
 
@@ -43,6 +44,8 @@ export type ConversionJob = {
   saved: boolean;
   errMsg: string;
   semantic?: boolean;
+  tmpDir?: string;
+  diagnostics?: TaskDiagnostics;
 };
 
 type StatusBox = {
@@ -182,6 +185,11 @@ export class PDFToMarkdownService {
 
     const progressItem = add("show-progress", "显示当前进度", async () => {
       this.showCurrentProgress();
+    });
+    add("open-logs", "打开翻译日志文件夹", async () => {
+      const path = this.diagnosticsRoot();
+      await IOUtils.makeDirectory(path, { ignoreExisting: true });
+      Zotero.File.reveal(path);
     });
     const separator = doc.createXULElement("menuseparator");
     popup.appendChild(separator);
@@ -349,6 +357,27 @@ export class PDFToMarkdownService {
 
     this.busy = true;
     try {
+      for (const job of jobs) await this.initDiagnostics(job);
+      if (semantic) {
+        const renderUrl = String(getPref("semanticRenderUrl") || "").trim();
+        if (!renderUrl) throw new Error("未配置 PDF 渲染服务");
+        for (const job of jobs) this.setLine(job, "检查渲染服务");
+        const response = await this.fetchWithTimeout(
+          `${renderUrl.replace(/\/+$/, "")}/health`,
+          { method: "GET" },
+          10000,
+        );
+        // Older renderers have no health route but do respond with HTTP 404.
+        if (!response.ok && response.status !== 404) {
+          throw new Error(`渲染服务预检查 HTTP ${response.status}`);
+        }
+        for (const job of jobs) {
+          await job.diagnostics?.event("render.preflight", {
+            status: response.status,
+            legacy: response.status === 404,
+          });
+        }
+      }
       this.queueTotal = Math.max(this.queueTotal, this.queueDone + jobs.length);
       this.statusShow(
         `PDF2MD ${outputFormat.toUpperCase()} ${this.queueDone}/${this.queueTotal}`,
@@ -413,11 +442,29 @@ export class PDFToMarkdownService {
         `PDF2MD: 完成 ${this.queueDone}/${this.queueTotal}${failed ? `, 本批失败 ${failed} 个` : ""}`,
       );
     } catch (e) {
+      for (const job of jobs.filter((job) => !job.saved && !job.errMsg)) {
+        job.errMsg = this.errorMessage(e);
+        await job.diagnostics?.event("error", {
+          message: job.errMsg,
+          stack: String(e?.stack || ""),
+        });
+      }
       this.log(`Conversion error: ${this.errorMessage(e)}\n${e?.stack || ""}`);
       this.statusHeadline("PDF2MD 出错");
       this.statusNote(this.short(this.errorMessage(e), 60));
       if (interactive && win) win.alert(`PDF2MD: ${this.errorMessage(e)}`);
     } finally {
+      for (const job of jobs) {
+        try {
+          await job.diagnostics?.finish(job.saved ? "completed" : "failed", {
+            error: job.errMsg || (job.saved ? "" : "任务未完成或插件已停止"),
+            outputName: job.outputName,
+          });
+        } catch (e) {
+          this.log(`Diagnostic write failed: ${this.errorMessage(e)}`);
+        }
+      }
+      this.statusNote(`日志: ${this.diagnosticsRoot()}`);
       this.busy = false;
       this.statusClose(8000);
     }
@@ -623,6 +670,10 @@ export class PDFToMarkdownService {
             this.setLine(job, "完成", "done");
           } catch (e) {
             job.errMsg = this.errorMessage(e);
+            await job.diagnostics?.event("error", {
+              message: job.errMsg,
+              stack: String(e?.stack || ""),
+            });
             this.setLine(job, this.short(job.errMsg, 40), "error");
           }
           onFinish();
@@ -687,6 +738,10 @@ export class PDFToMarkdownService {
       }
     } catch (e) {
       job.errMsg = this.errorMessage(e);
+      await job.diagnostics?.event("error", {
+        message: job.errMsg,
+        stack: String(e?.stack || ""),
+      });
       this.setLine(job, this.short(job.errMsg, 40), "error");
     } finally {
       job.finished = true;
@@ -831,6 +886,10 @@ export class PDFToMarkdownService {
       this.setLine(job, "完成", "done");
     } catch (e) {
       job.errMsg = this.errorMessage(e);
+      await job.diagnostics?.event("error", {
+        message: job.errMsg,
+        stack: String(e?.stack || ""),
+      });
       this.setLine(job, this.short(job.errMsg, 40), "error");
     } finally {
       job.finished = true;
@@ -964,10 +1023,50 @@ export class PDFToMarkdownService {
       thinkingEffort: String(getPref("semanticThinkingEffort") || "medium"),
       targetLanguage: String(getPref("semanticLanguage") || "简体中文"),
       fetchImpl: win.fetch.bind(win),
+      diagnostic: async (type, detail) => {
+        if (type === "translation.chunk") {
+          this.setLine(job, `翻译第 1 轮 (${detail.index}/${detail.total})`);
+        }
+        await job.diagnostics?.event(type, detail);
+      },
     });
-    const markdown = await IOUtils.readUTF8(markdownPath);
+    let markdown = await IOUtils.readUTF8(markdownPath);
+    this.setLine(job, "恢复原文组图");
+    const figureResponse = await this.fetchWithTimeout(
+      `${String(getPref("semanticRenderUrl") || "").replace(/\/+$/, "")}/v1/prepare-figures`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          markdown,
+          resourceDir: tmpDir,
+          sourcePdfPath: job.path,
+        }),
+      },
+      180000,
+    );
+    if (!figureResponse.ok) {
+      const detail = await figureResponse.text();
+      await job.diagnostics?.event("figures.error", {
+        status: figureResponse.status,
+        body: detail,
+      });
+      throw new Error(
+        `组图服务 HTTP ${figureResponse.status}: ${detail}（请更新并重启渲染服务）`,
+      );
+    }
+    const figures = await figureResponse.json();
+    if (typeof figures.markdown !== "string")
+      throw new Error("组图服务没有返回 Markdown");
+    await job.diagnostics?.save("figures.json", {
+      figures: figures.figures,
+      warnings: figures.warnings,
+    });
+    await job.diagnostics?.save("prepared-source.md", figures.markdown);
+    markdown = figures.markdown;
     this.setLine(job, "翻译第 1 轮");
     let result = await pipeline.run(markdown);
+    await this.saveTranslationCheckpoint(job, result);
     this.setLine(job, "公式复核");
     result = pipeline.applyFormulaRepairs(
       result,
@@ -976,6 +1075,7 @@ export class PDFToMarkdownService {
         result.repairs,
       ),
     );
+    await this.saveTranslationCheckpoint(job, result);
     if (result.assetCheck.images.missing.length) {
       throw new Error(
         `语义修复丢失图片占位符: ${result.assetCheck.images.missing.join(", ")}`,
@@ -991,6 +1091,7 @@ export class PDFToMarkdownService {
         result,
         Array.isArray(review.result) ? review.result : [],
       );
+      await this.saveTranslationCheckpoint(job, result);
       await IOUtils.writeUTF8(
         PathUtils.join(tmpDir, "semantic-review.json"),
         JSON.stringify(review.result, null, 2),
@@ -1001,6 +1102,11 @@ export class PDFToMarkdownService {
     if (!renderUrl) {
       throw new Error("未配置 PDF 渲染服务，无法完成“翻译至 PDF”");
     }
+    await job.diagnostics?.save("render-input.json", {
+      markdown: result.markdown,
+      title: job.outputName.replace(/\.md$/i, ""),
+      resourceDir: tmpDir,
+    });
     const pdfBytes = await pipeline.renderMarkdown(
       result.markdown,
       job.outputName.replace(/\.md$/i, ""),
@@ -1010,6 +1116,11 @@ export class PDFToMarkdownService {
     const pdfName = job.outputName.replace(/\.md$/i, ".pdf");
     const pdfPath = PathUtils.join(tmpDir, pdfName);
     await IOUtils.write(pdfPath, pdfBytes);
+    await job.diagnostics?.event("pdf.saved", {
+      path: pdfPath,
+      bytes: pdfBytes.length,
+    });
+    this.setLine(job, "导入 Zotero");
     await this.importAttachment(
       {
         ...job,
@@ -1072,6 +1183,19 @@ export class PDFToMarkdownService {
       }
       if (!mdEntry) throw new Error("markdown not in result zip");
       zr.extract(mdEntry, Zotero.File.pathToFile(mdPath));
+      const layoutEntries = zr.findEntries("*layout.json");
+      while (layoutEntries.hasMore()) {
+        const entry = layoutEntries.getNext();
+        if (/(^|\/)layout\.json$/.test(String(entry).replace(/\\/g, "/"))) {
+          zr.extract(
+            entry,
+            Zotero.File.pathToFile(
+              PathUtils.join(PathUtils.parent(mdPath), "layout.json"),
+            ),
+          );
+          break;
+        }
+      }
 
       if (imagesDir) {
         for (const entry of imageEntries) {
@@ -1139,6 +1263,11 @@ export class PDFToMarkdownService {
       if (cols.length) options.collections = cols;
     }
     const att = await (Zotero.Attachments as any).importFromFile(options);
+    await job.diagnostics?.event("attachment.imported", {
+      key: att.key,
+      itemID: att.id,
+      path: filePath,
+    });
     await this.tagConversionResult(att, job.parent);
     if (cleanup) await this.removeTemp(tmpDir);
     return att;
@@ -1529,6 +1658,12 @@ export class PDFToMarkdownService {
     status: string,
     kind?: "done" | "error",
   ): void {
+    job.diagnostics
+      ?.event(kind === "error" ? "error" : "stage", {
+        status,
+        ...(kind === "error" ? { message: job.errMsg || status } : {}),
+      })
+      .catch((error) => this.log(`Diagnostic write failed: ${error}`));
     if (kind !== "done") this.statusCurrent(job, status);
     this.statusLine(
       job.progressKey,
@@ -1943,10 +2078,50 @@ export class PDFToMarkdownService {
   }
 
   private jobTmpDir(job: ConversionJob): string {
+    return (job.tmpDir ||= PathUtils.join(
+      this.diagnosticsRoot(),
+      `${job.dataId}-${Date.now()}`,
+    ));
+  }
+
+  private diagnosticsRoot(): string {
     return PathUtils.join(
       Zotero.getTempDirectory().path,
-      `${config.addonRef}-${job.dataId}-${Date.now()}`,
+      `${config.addonRef}-logs`,
     );
+  }
+
+  private async initDiagnostics(job: ConversionJob): Promise<void> {
+    const dir = this.jobTmpDir(job);
+    await IOUtils.makeDirectory(dir, {
+      createAncestors: true,
+      ignoreExisting: true,
+    });
+    job.diagnostics = new TaskDiagnostics(
+      (name, content) => IOUtils.writeUTF8(PathUtils.join(dir, name), content),
+      ["semanticApiKey", "apiToken", "localApiKey"].map((key) =>
+        String(getPref(key) || ""),
+      ),
+    );
+    await job.diagnostics.save("task.json", {
+      startedAt: new Date().toISOString(),
+      version,
+      attachmentKey: job.att.key,
+      parentKey: job.parent?.key,
+      sourcePath: job.path,
+      pdfName: job.pdfName,
+      semantic: job.semantic,
+      outputFormat: job.outputFormat,
+    });
+    await job.diagnostics.finish("running", { error: "" });
+  }
+
+  private async saveTranslationCheckpoint(
+    job: ConversionJob,
+    result: unknown,
+  ): Promise<void> {
+    await job.diagnostics?.save("translation-result.json", result);
+    await job.diagnostics?.save("translated.md", result.markdown);
   }
 
   private zipImageRelativePath(entry: string): string {
@@ -2022,6 +2197,8 @@ export class PDFToMarkdownService {
   }
 
   private async removeTemp(tmpDir: string): Promise<void> {
+    // Keep per-task input, checkpoints and output even after successful import.
+    if (PathUtils.parent(tmpDir) === this.diagnosticsRoot()) return;
     try {
       await IOUtils.remove(tmpDir, { recursive: true, ignoreAbsent: true });
     } catch (e) {
