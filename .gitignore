@@ -1,5 +1,20 @@
-# dot files
+# OS and editor-local files
 .DS_Store
+Thumbs.db
+Desktop.ini
+/.vscode/
+/.idea/
+*.swp
+*.swo
+*~
+
+# Unused upstream template files (local copies may remain)
+/.rumdl.toml
+/.rumdl_cache/
+/.github/renovate.json
+/.github/workflows/issue-bot.yml
+/doc/image.png
+/doc/image-1.png
 
 # Node.js
 node_modules
@@ -7,7 +22,7 @@ pnpm-lock.yaml
 yarn.lock
 
 # TSC
-tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # Scaffold
 .env
@@ -26,3 +41,11 @@ secrets*.json
 build
 logs
 /pdf-to-markdown.xpi
+
+# Local caches and run artifacts; published XPI files belong in Releases
+*.xpi
+*.log
+/coverage/
+/.cache/
+__pycache__/
+*.pyc
