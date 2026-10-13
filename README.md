@@ -7,6 +7,16 @@ Zotero PDF 全文翻译插件，基于 [LuckYang1/PDF-to-md](https://github.com/
 
 [下载 XPI](https://github.com/Qiuyin616/pdf2zh/releases/latest) · [反馈问题](https://github.com/Qiuyin616/pdf2zh/issues) · [English](README-en.md)
 
+## 翻译成果示例
+
+以下为 Mei 等（2026）《硅负极嵌锂：其力学性能概述及基于原位测试结果的应力演化预测案例研究》的实际中文译文 PDF 页面，使用本项目翻译流程及新版渲染服务生成。点击图片可查看原尺寸。
+
+| 中文正文、原论文图表与翻译图注                                                                                                           | 行内公式、独立公式与编号                                                                                                                  |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [![中文译文第 8 页：杨氏模量图表、中文图注及编号公式](doc/examples/mei-translated-page-08.png)](doc/examples/mei-translated-page-08.png) | [![中文译文第 11 页：扩散力学模型、行内公式及编号公式](doc/examples/mei-translated-page-11.png)](doc/examples/mei-translated-page-11.png) |
+
+图表内部文字保留原图，不自动重绘或翻译。译文重新排版，不复刻原 PDF 的分页和双栏布局；示例仅展示输出效果，不代表 OCR、翻译和所有公式已通过人工核对。
+
 ## 1. 安装插件
 
 1. 从本仓库 [Releases](https://github.com/Qiuyin616/pdf2zh/releases) 下载 `pdf-to-markdown.xpi`，不要使用不含本改造的上游 XPI。
