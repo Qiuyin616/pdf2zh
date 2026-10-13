@@ -1,8 +1,8 @@
 {
   "name": "pdf-to-md",
   "type": "module",
-  "version": "0.1.2",
-  "description": "Export Zotero PDF attachments to Markdown.",
+  "version": "0.2.0",
+  "description": "Translate Zotero PDF attachments with MinerU and an AI API, then attach a rendered PDF.",
   "keywords": [
     "zotero",
     "zotero-plugin",
@@ -20,19 +20,20 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LuckYang1/PDF-to-md.git"
+    "url": "git+https://github.com/Qiuyin616/pdf2zh.git"
   },
   "author": "YSY",
   "bugs": {
-    "url": "https://github.com/LuckYang1/PDF-to-md/issues"
+    "url": "https://github.com/Qiuyin616/pdf2zh/issues"
   },
-  "homepage": "https://github.com/LuckYang1/PDF-to-md#readme",
+  "homepage": "https://github.com/Qiuyin616/pdf2zh#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",
     "build": "zotero-plugin build && tsc --noEmit",
     "lint:check": "prettier --check . && eslint .",
     "lint:fix": "prettier --write . && eslint . --fix",
+    "render-service": "node service/render-service.mjs",
     "release": "zotero-plugin release",
     "test": "zotero-plugin test",
     "update-deps": "npm update --save"

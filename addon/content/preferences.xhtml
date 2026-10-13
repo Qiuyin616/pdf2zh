@@ -138,6 +138,97 @@
   </groupbox>
 
   <groupbox>
+    <label><html:h2 data-l10n-id="pref-semantic-title"></html:h2></label>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-api-url"
+        control="zotero-prefpane-__addonRef__-semantic-api-url"
+      />
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-semantic-api-url"
+        preference="semanticApiUrl"
+        style="flex: 1; margin-left: 6px"
+      />
+    </hbox>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-api-key"
+        control="zotero-prefpane-__addonRef__-semantic-api-key"
+      />
+      <html:input
+        type="password"
+        id="zotero-prefpane-__addonRef__-semantic-api-key"
+        preference="semanticApiKey"
+        style="flex: 1; margin-left: 6px"
+      />
+    </hbox>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-model"
+        control="zotero-prefpane-__addonRef__-semantic-model"
+      />
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-semantic-model"
+        preference="semanticModel"
+        style="flex: 1; margin-left: 6px"
+      />
+    </hbox>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-language"
+        control="zotero-prefpane-__addonRef__-semantic-language"
+      />
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-semantic-language"
+        preference="semanticLanguage"
+        style="width: 8em; margin-left: 6px"
+      />
+    </hbox>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-thinking"
+        control="zotero-prefpane-__addonRef__-semantic-thinking"
+      />
+      <menulist
+        id="zotero-prefpane-__addonRef__-semantic-thinking"
+        native="true"
+        preference="semanticThinkingEffort"
+      >
+        <menupopup>
+          <menuitem data-l10n-id="pref-semantic-thinking-none" value="none" />
+          <menuitem data-l10n-id="pref-semantic-thinking-low" value="low" />
+          <menuitem
+            data-l10n-id="pref-semantic-thinking-medium"
+            value="medium"
+          />
+          <menuitem data-l10n-id="pref-semantic-thinking-high" value="high" />
+        </menupopup>
+      </menulist>
+    </hbox>
+    <hbox align="center">
+      <label
+        data-l10n-id="pref-semantic-render-url"
+        control="zotero-prefpane-__addonRef__-semantic-render-url"
+      />
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-semantic-render-url"
+        preference="semanticRenderUrl"
+        style="flex: 1; margin-left: 6px"
+      />
+    </hbox>
+    <checkbox
+      native="true"
+      preference="semanticVisualReview"
+      data-l10n-id="pref-semantic-visual-review"
+    />
+    <description data-l10n-id="pref-semantic-help"></description>
+  </groupbox>
+
+  <groupbox>
     <label><html:h2 data-l10n-id="pref-export-title"></html:h2></label>
     <hbox align="center">
       <label

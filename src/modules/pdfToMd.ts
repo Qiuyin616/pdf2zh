@@ -3,6 +3,7 @@
 import { config } from "../../package.json";
 import { getPref, setPref } from "../utils/prefs";
 import { renderMarkdownToHTML, renderMarkdownZipToHTML } from "./renderHtml";
+import { SemanticPipeline } from "./semanticPipeline";
 
 export type OutputFormat = "markdown" | "html";
 
@@ -19,6 +20,7 @@ type ZoteroWindow = _ZoteroTypes.MainWindow & {
 type ConvertOptions = {
   interactive: boolean;
   outputFormat: OutputFormat;
+  semantic?: boolean;
 };
 
 type Candidate = {
@@ -40,6 +42,7 @@ export type ConversionJob = {
   finished: boolean;
   saved: boolean;
   errMsg: string;
+  semantic?: boolean;
 };
 
 type StatusBox = {
@@ -189,6 +192,9 @@ export class PDFToMarkdownService {
     add("convert-md", "转换为 Markdown (MinerU)", () =>
       this.convertSelectedItems(win, "markdown"),
     );
+    add("semantic-pdf", "翻译至 PDF", () =>
+      this.convertSelectedItems(win, "markdown", true),
+    );
     add("convert-html", "转换为 HTML (MinerU)", () =>
       this.convertSelectedItems(win, "html"),
     );
@@ -223,13 +229,18 @@ export class PDFToMarkdownService {
   async convertSelectedItems(
     win: ZoteroWindow,
     outputFormat: OutputFormat,
+    semantic = false,
   ): Promise<void> {
     const items = this.getSelectedItems(win);
     if (!items.length) {
       win.alert("未选择条目。");
       return;
     }
-    this.enqueueConvert(items, win, { interactive: true, outputFormat });
+    this.enqueueConvert(items, win, {
+      interactive: true,
+      outputFormat,
+      semantic,
+    });
   }
 
   enqueueConvert(
@@ -237,7 +248,11 @@ export class PDFToMarkdownService {
     win: ZoteroWindow | null,
     opts: ConvertOptions,
   ): Promise<void> {
-    const signature = this.enqueueSignature(items, opts.outputFormat);
+    const signature = this.enqueueSignature(
+      items,
+      opts.outputFormat,
+      !!opts.semantic,
+    );
     if (this.enqueuedSignatures.has(signature)) {
       this.toast(["PDF2MD: 相同任务已在队列中"], 2000);
       return this.chain;
@@ -307,7 +322,7 @@ export class PDFToMarkdownService {
   private async runConversion(
     items: Zotero.Item[],
     win: ZoteroWindow | null,
-    { interactive, outputFormat }: ConvertOptions,
+    { interactive, outputFormat, semantic = false }: ConvertOptions,
   ): Promise<void> {
     if (!addon.data.alive) return;
 
@@ -320,7 +335,11 @@ export class PDFToMarkdownService {
       light = !token;
     }
 
-    const { jobs, skipped } = await this.collectJobs(items, outputFormat);
+    const { jobs, skipped } = await this.collectJobs(
+      items,
+      outputFormat,
+      semantic,
+    );
     if (skipped.length) this.log(`Skipped:\n  ${skipped.join("\n  ")}`);
     if (!jobs.length) {
       if (interactive)
@@ -407,6 +426,7 @@ export class PDFToMarkdownService {
   private async collectJobs(
     items: Zotero.Item[],
     outputFormat: OutputFormat,
+    semantic = false,
   ): Promise<{ jobs: ConversionJob[]; skipped: string[] }> {
     const candidates: Candidate[] = [];
     const seen = new Set<number>();
@@ -474,8 +494,11 @@ export class PDFToMarkdownService {
           siblingPDFCount > 1,
           outputFormat,
         );
-        if (parent && this.hasOutputAttachment(parent, outputName)) {
-          skipped.push(`${this.label(sourceItem)}: 已存在 ${outputName}`);
+        const duplicateName = semantic
+          ? outputName.replace(/\.md$/i, ".pdf")
+          : outputName;
+        if (parent && this.hasOutputAttachment(parent, duplicateName)) {
+          skipped.push(`${this.label(sourceItem)}: 已存在 ${duplicateName}`);
           continue;
         }
         jobs.push({
@@ -491,6 +514,7 @@ export class PDFToMarkdownService {
           finished: false,
           saved: false,
           errMsg: "",
+          semantic,
         });
       } catch (e) {
         skipped.push(`${this.label(sourceItem)}: ${this.errorMessage(e)}`);
@@ -840,6 +864,10 @@ export class PDFToMarkdownService {
       await this.saveHTMLFromZip(job, zipPath, outputPath, tmpDir);
     } else {
       await this.extractMarkdownFromZip(zipPath, outputPath, imagesDir);
+      if (job.semantic) {
+        await this.saveSemanticResult(job, outputPath, imagesDir, tmpDir);
+        return;
+      }
       const hasImages = (await this.countFiles(imagesDir)) > 0;
       const att = await this.importAttachment(job, outputPath, tmpDir, false);
       if (hasImages) {
@@ -873,6 +901,10 @@ export class PDFToMarkdownService {
     } else {
       await IOUtils.writeUTF8(outputPath, markdown);
     }
+    if (job.semantic && job.outputFormat === "markdown") {
+      await this.saveSemanticResult(job, outputPath, "", tmpDir);
+      return;
+    }
     await this.importAttachment(job, outputPath, tmpDir);
   }
 
@@ -900,12 +932,94 @@ export class PDFToMarkdownService {
     }
 
     await this.extractMarkdownFromZip(zipPath, outputPath, imagesDir);
+    if (job.semantic) {
+      await this.saveSemanticResult(job, outputPath, imagesDir, tmpDir);
+      return;
+    }
     const hasImages = (await this.countFiles(imagesDir)) > 0;
     const att = await this.importAttachment(job, outputPath, tmpDir, false);
     if (hasImages) {
       const copied = await this.copyCompanionImages(att, imagesDir);
       this.log(`${job.pdfName}: copied ${copied} image(s)`);
     }
+    await this.removeTemp(tmpDir);
+  }
+
+  private async saveSemanticResult(
+    job: ConversionJob,
+    markdownPath: string,
+    imagesDir: string,
+    tmpDir: string,
+  ): Promise<void> {
+    const apiUrl = String(getPref("semanticApiUrl") || "").trim();
+    const apiKey = String(getPref("semanticApiKey") || "").trim();
+    if (!apiUrl || !apiKey) {
+      throw new Error("语义修复 API 未配置，请先填写 API 地址和 API Key");
+    }
+    const win = this.mainWindow();
+    const pipeline = new SemanticPipeline({
+      apiUrl,
+      apiKey,
+      model: String(getPref("semanticModel") || "gpt-6.1-sol"),
+      thinkingEffort: String(getPref("semanticThinkingEffort") || "medium"),
+      targetLanguage: String(getPref("semanticLanguage") || "简体中文"),
+      fetchImpl: win.fetch.bind(win),
+    });
+    const markdown = await IOUtils.readUTF8(markdownPath);
+    this.setLine(job, "翻译第 1 轮");
+    let result = await pipeline.run(markdown);
+    this.setLine(job, "公式复核");
+    result = pipeline.applyFormulaRepairs(
+      result,
+      await pipeline.verifyFormulaRepairs(
+        result.protectedDoc.formulas,
+        result.repairs,
+      ),
+    );
+    if (result.assetCheck.images.missing.length) {
+      throw new Error(
+        `语义修复丢失图片占位符: ${result.assetCheck.images.missing.join(", ")}`,
+      );
+    }
+    if (getPref("semanticVisualReview")) {
+      this.setLine(job, "翻译第 2 轮（PDF复核）");
+      const review = await pipeline.reviewPdf(await IOUtils.read(job.path), [
+        ...result.repairs,
+        ...result.inlineCandidates,
+      ]);
+      result = pipeline.applyVisualDecisions(
+        result,
+        Array.isArray(review.result) ? review.result : [],
+      );
+      await IOUtils.writeUTF8(
+        PathUtils.join(tmpDir, "semantic-review.json"),
+        JSON.stringify(review.result, null, 2),
+      );
+    }
+    this.setLine(job, "渲染 PDF");
+    const renderUrl = String(getPref("semanticRenderUrl") || "").trim();
+    if (!renderUrl) {
+      throw new Error("未配置 PDF 渲染服务，无法完成“翻译至 PDF”");
+    }
+    const pdfBytes = await pipeline.renderMarkdown(
+      result.markdown,
+      job.outputName.replace(/\.md$/i, ""),
+      tmpDir,
+      renderUrl,
+    );
+    const pdfName = job.outputName.replace(/\.md$/i, ".pdf");
+    const pdfPath = PathUtils.join(tmpDir, pdfName);
+    await IOUtils.write(pdfPath, pdfBytes);
+    await this.importAttachment(
+      {
+        ...job,
+        outputName: pdfName,
+        contentType: "application/pdf",
+      },
+      pdfPath,
+      tmpDir,
+      false,
+    );
     await this.removeTemp(tmpDir);
   }
 
@@ -1328,8 +1442,9 @@ export class PDFToMarkdownService {
   private enqueueSignature(
     items: Zotero.Item[],
     outputFormat: OutputFormat,
+    semantic = false,
   ): string {
-    return `${outputFormat}:${items
+    return `${semantic ? "semantic" : "plain"}:${outputFormat}:${items
       .map((item) => item.id)
       .sort((a, b) => a - b)
       .join(",")}`;

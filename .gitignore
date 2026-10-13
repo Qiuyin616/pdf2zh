@@ -11,6 +11,17 @@ tsconfig.tsbuildinfo
 
 # Scaffold
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+/diagnostics/
+/tmp/
+/output/
+/zotero-profile/
+/zotero-data/
 .scaffold
 build
 logs

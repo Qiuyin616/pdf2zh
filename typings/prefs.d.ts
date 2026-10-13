@@ -22,6 +22,13 @@ declare namespace _ZoteroTypes {
       "localApiKey": string;
       "localApiType": string;
       "localRouterConcurrency": number;
+      "semanticApiUrl": string;
+      "semanticApiKey": string;
+      "semanticModel": string;
+      "semanticThinkingEffort": string;
+      "semanticLanguage": string;
+      "semanticRenderUrl": string;
+      "semanticVisualReview": boolean;
     };
   }
 }
