@@ -36,7 +36,7 @@ git clone https://github.com/Qiuyin616/pdf2zh.git
 cd pdf2zh
 ```
 
-入口是 `service/render-service.mjs`。服务仅使用 Node.js 内置模块，单独运行它不需要 `npm install`，但需要以下系统依赖：
+入口是 `service/render-service.mjs`，需保留整个 `service` 目录，包括 `render-compatibility.mjs` 和 `math-normalization.mjs`。服务仅使用 Node.js 内置模块，单独运行它不需要 `npm install`，但需要以下系统依赖：
 
 | 依赖            | 用途与安装                                                                                                  | 检查命令                           |
 | --------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -82,6 +82,18 @@ SEMANTIC_RENDER_PORT=8766 PANDOC_BIN=/path/to/pandoc node service/render-service
 Windows CMD 可先执行 `set SEMANTIC_RENDER_PORT=8766` 再运行 BAT。更改端口后同步修改 Zotero 设置。服务仅绑定本机 `127.0.0.1`，没有远程认证方案，不要直接对公网开放。
 
 ### 渲染测试
+
+正常排版兼容性：支持 `$…$`、`$$…$$`、`\(…\)`、`\[…\]`、相邻显示公式 `$$a$$$$b$$`；重复外层 `$$$$x$$$$` 会规范为显示公式，代码中的美元符号保持原样。支持常见 `equation / align / gather / multline / aligned / split / array / matrix / cases` 环境和编号、引用；消除独立数学环境被重复包入数学模式的问题。显式带 `\tag` 的行内包裹转为显示公式。过宽普通显示公式会缩放到版心，编号保留在外；极长公式仍可能需要人工分行。
+
+数学字体采用兼容传统 AMS 粗体宏的配置，避免默认 `unicode-math` 与 `\bm` 冲突。需安装 `mathtools`、`amssymb`、`bm`、`mathrsfs`、`graphicx`、`fontspec`、`lmodern`、`fvextra`。常见 Unicode 希腊字母及基础数学符号仅在数学区转换为等价 LaTeX；正文和代码不作公式推断。Unicode 数学字母（例如 `𝐂`、`𝑥`、`𝛔`、`𝒶`）保留原字形，使用 STIX Two Math 或 TeX Gyre Pagella Math 字体，不将粗体字母误降为普通字母。Markdown 与 HTML 表格中的数学单元格会保留为结构化表格。
+
+`siunitx`、`mhchem` 为可选宏包：系统已安装时自动加载；未安装的专用宏、自定义宏或真正不合法的数学语法仍可能退回原文。支持范围通过样例验证，不承诺任意第三方 LaTeX 模板或宏包都能无修改编译。
+
+渲染采用容错回退：先正常排版；遇到公式、原始 TeX 或图片内容错误时，保留可正常排版的内容，将有问题的片段显示为字面原文。无法局部恢复时，输出全文 Markdown 原文 PDF，不因内容编译错误直接丢弃成果。定位最多尝试 24 次，每个渲染子进程最多运行 30 秒。缺少 Pandoc / XeLaTeX、字体或文件写入权限等环境故障仍可能阻止 PDF 输出。
+
+响应头 `X-Render-Mode` 为 `normal`、`partial-raw` 或 `raw`，`X-Render-Fallback-Count` 表示退回原文的片段数。回退不重新调用翻译 API，也不自动更改公式数学含义。运行 `npm run test:render` 可检查回退逻辑，无需启动 Zotero。
+
+运行 `npm run test:render:integration` 可执行真实 Pandoc / XeLaTeX 测试（需要上述渲染依赖）；测试自动使用临时本机端口并在结束后关闭实例。合法常见形式必须满足正常排版、零回退、零缺字，未知命令另测原文回退。响应头 `X-Render-Warning-Count` 和 `X-Render-Missing-Glyph-Count` 供诊断使用，不能把仅有 HTTP 200 当作无缺字的证明。
 
 macOS / Linux 示例：
 

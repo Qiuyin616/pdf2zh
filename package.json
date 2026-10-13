@@ -1,7 +1,7 @@
 {
   "name": "pdf-to-md",
   "type": "module",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Translate Zotero PDF attachments with MinerU and an AI API, then attach a rendered PDF.",
   "keywords": [
     "zotero",
@@ -36,6 +36,8 @@
     "render-service": "node service/render-service.mjs",
     "release": "zotero-plugin release",
     "test": "zotero-plugin test",
+    "test:render": "node --test service/math-normalization.test.mjs service/render-compatibility.test.mjs",
+    "test:render:integration": "node --test service/render-integration.test.mjs",
     "update-deps": "npm update --save"
   },
   "dependencies": {
