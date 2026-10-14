@@ -207,10 +207,10 @@ export function restoreMarkdown(
     const replacement = useOriginal
       ? formula.raw
       : wrapFormula(formula, repair.latex as string);
-    output = output.replace(`[[${formula.id}]]`, () => replacement);
+    output = output.replaceAll(`[[${formula.id}]]`, () => replacement);
   }
   for (let i = 0; i < protectedDoc.images.length; i++) {
-    output = output.replace(
+    output = output.replaceAll(
       `[[IMG${String(i + 1).padStart(3, "0")}]]`,
       () => protectedDoc.images[i],
     );

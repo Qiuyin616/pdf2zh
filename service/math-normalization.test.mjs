@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeMathDocument,
+  normalizeInlineMathDelimiters,
   normalizeMathSymbols,
   expandHtmlTables,
   fitDisplayMath,
@@ -199,4 +200,14 @@ test("math template preserves the surrounding default template and dollar text",
   assert.ok(result.includes("\\usepackage{fontspec}"));
   assert.ok(!result.includes("unicode-math"));
   assert.throws(() => mathTemplate("missing hook"), /font template/);
+});
+
+test("inline formula before a digit keeps its boundary without touching code or currency", () => {
+  assert.equal(
+    normalizeInlineMathDelimiters(String.raw`约$\sim$1.2，$x$2，单位$^{-2}$。`),
+    String.raw`约\(\sim\)1.2，\(x\)2，单位$^{-2}$。`,
+  );
+  const code =
+    "```tex\n$\\sim$1.2\n```\n`$x$2` \n$$x$$2 金额 \\$5 和 $10 and $20";
+  assert.equal(normalizeInlineMathDelimiters(code), code);
 });

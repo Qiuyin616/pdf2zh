@@ -11,6 +11,7 @@ import { renderCompatible } from "./render-compatibility.mjs";
 import { prepareFigures, layoutFigureBlocks } from "./figure-layout.mjs";
 import {
   normalizeMathDocument,
+  normalizeInlineMathDelimiters,
   expandHtmlTables,
   mathPreamble,
   mathTemplate,
@@ -133,7 +134,7 @@ async function render(payload) {
     const parse = async (markdown) =>
       normalizeMathDocument(
         await expandHtmlTables(
-          await parseSource(markdown, reader),
+          await parseSource(normalizeInlineMathDelimiters(markdown), reader),
           (html) =>
             parseSource(
               html,

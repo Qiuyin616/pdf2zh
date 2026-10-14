@@ -1,7 +1,7 @@
 {
   "name": "pdf-to-md",
   "type": "module",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Translate Zotero PDF attachments with MinerU and an AI API, then attach a rendered PDF.",
   "keywords": [
     "zotero",

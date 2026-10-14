@@ -160,3 +160,10 @@ $$\DefinitelyInvalidMacro{x}\tag{X}$$
     assert.equal(response.headers.get("x-render-missing-glyph-count"), "0");
   },
 );
+
+test("math immediately followed by digits renders without fallback", async () => {
+  const result = await render(
+    String.raw`在半电池中，研究了约$\sim$1.2 mg cm$^{-2}$质量负载，以及$\sim$3380 mAh g$^{-1}$的容量。`,
+  );
+  assert.equal(result.headers.get("x-render-mode"), "normal");
+});

@@ -5,6 +5,7 @@ import { getPref, setPref } from "../utils/prefs";
 import { renderMarkdownToHTML, renderMarkdownZipToHTML } from "./renderHtml";
 import { SemanticPipeline } from "./semanticPipeline";
 import { TaskDiagnostics } from "./taskDiagnostics";
+import { restoreMarkdown } from "./semanticRepair";
 
 export type OutputFormat = "markdown" | "html";
 
@@ -202,6 +203,9 @@ export class PDFToMarkdownService {
     );
     add("semantic-pdf", "翻译至 PDF", () =>
       this.convertSelectedItems(win, "markdown", true),
+    );
+    add("retry-render", "重试渲染（使用已保存译文）", () =>
+      this.retryRenderSelected(win),
     );
     add("convert-html", "转换为 HTML (MinerU)", () =>
       this.convertSelectedItems(win, "html"),
@@ -1023,6 +1027,11 @@ export class PDFToMarkdownService {
       thinkingEffort: String(getPref("semanticThinkingEffort") || "medium"),
       targetLanguage: String(getPref("semanticLanguage") || "简体中文"),
       fetchImpl: win.fetch.bind(win),
+      renderRuntime: {
+        AbortController: win.AbortController,
+        setTimeout: win.setTimeout.bind(win),
+        clearTimeout: win.clearTimeout.bind(win),
+      },
       diagnostic: async (type, detail) => {
         if (type === "translation.chunk") {
           this.setLine(job, `翻译第 1 轮 (${detail.index}/${detail.total})`);
@@ -1097,20 +1106,29 @@ export class PDFToMarkdownService {
         JSON.stringify(review.result, null, 2),
       );
     }
+    await this.renderTranslatedResult(job, pipeline, result.markdown, tmpDir);
+  }
+
+  private async renderTranslatedResult(
+    job: ConversionJob,
+    pipeline: SemanticPipeline,
+    markdown: string,
+    resourceDir: string,
+  ): Promise<void> {
+    const tmpDir = this.jobTmpDir(job);
     this.setLine(job, "渲染 PDF");
     const renderUrl = String(getPref("semanticRenderUrl") || "").trim();
-    if (!renderUrl) {
-      throw new Error("未配置 PDF 渲染服务，无法完成“翻译至 PDF”");
-    }
+    if (!renderUrl) throw new Error("未配置 PDF 渲染服务");
+    const title = job.outputName.replace(/\.md$/i, "");
     await job.diagnostics?.save("render-input.json", {
-      markdown: result.markdown,
-      title: job.outputName.replace(/\.md$/i, ""),
-      resourceDir: tmpDir,
+      markdown,
+      title,
+      resourceDir,
     });
     const pdfBytes = await pipeline.renderMarkdown(
-      result.markdown,
-      job.outputName.replace(/\.md$/i, ""),
-      tmpDir,
+      markdown,
+      title,
+      resourceDir,
       renderUrl,
     );
     const pdfName = job.outputName.replace(/\.md$/i, ".pdf");
@@ -1122,16 +1140,111 @@ export class PDFToMarkdownService {
     });
     this.setLine(job, "导入 Zotero");
     await this.importAttachment(
-      {
-        ...job,
-        outputName: pdfName,
-        contentType: "application/pdf",
-      },
+      { ...job, outputName: pdfName, contentType: "application/pdf" },
       pdfPath,
       tmpDir,
       false,
     );
     await this.removeTemp(tmpDir);
+  }
+
+  async retryRenderSelected(win: ZoteroWindow): Promise<void> {
+    const items = this.getSelectedItems(win);
+    const recovery = this.chain.then(async () => {
+      const { jobs, skipped } = await this.collectJobs(items, "markdown", true);
+      if (!jobs.length)
+        throw new Error(skipped.join("；") || "请选择原始 PDF 附件");
+      this.busy = true;
+      try {
+        for (const job of jobs) await this.retryRenderJob(job);
+        this.toast(["PDF2MD: 已使用保存的译文生成 PDF 并导入 Zotero"], 5000);
+      } finally {
+        this.busy = false;
+      }
+    });
+    this.chain = recovery.catch((e) =>
+      this.log(`Render retry error: ${this.errorMessage(e)}`),
+    );
+    return recovery;
+  }
+
+  private async retryRenderJob(job: ConversionJob): Promise<void> {
+    const root = this.diagnosticsRoot();
+    const paths = (await IOUtils.getChildren(root))
+      .filter((path) => PathUtils.filename(path).startsWith(`${job.dataId}-`))
+      .sort()
+      .reverse();
+    let sourceDir: string | undefined;
+    for (const path of paths) {
+      if (
+        await IOUtils.exists(PathUtils.join(path, "translation-result.json"))
+      ) {
+        sourceDir = path;
+        break;
+      }
+    }
+    if (!sourceDir) throw new Error("没有找到已保存译文，请先执行“翻译至 PDF”");
+    const task = JSON.parse(
+      await IOUtils.readUTF8(PathUtils.join(sourceDir, "task.json")),
+    );
+    if (task.attachmentKey !== job.att.key || !task.semantic)
+      throw new Error("保存的译文与所选 PDF 不匹配");
+    const result = JSON.parse(
+      await IOUtils.readUTF8(
+        PathUtils.join(sourceDir, "translation-result.json"),
+      ),
+    );
+    result.markdown = restoreMarkdown(
+      result.protectedMarkdown,
+      result.protectedDoc,
+      result.repairs,
+    );
+    const oldInputPath = PathUtils.join(sourceDir, "render-input.json");
+    const resourceDir = (await IOUtils.exists(oldInputPath))
+      ? JSON.parse(await IOUtils.readUTF8(oldInputPath)).resourceDir ||
+        sourceDir
+      : sourceDir;
+    await this.initDiagnostics(job);
+    try {
+      await job.diagnostics?.event("render.resumed", {
+        sourceDir,
+        resourceDir,
+      });
+      await this.saveTranslationCheckpoint(job, result);
+      const win = this.mainWindow();
+      const pipeline = new SemanticPipeline({
+        apiUrl: "",
+        apiKey: "",
+        model: "",
+        fetchImpl: win.fetch.bind(win),
+        renderRuntime: {
+          AbortController: win.AbortController,
+          setTimeout: win.setTimeout.bind(win),
+          clearTimeout: win.clearTimeout.bind(win),
+        },
+        diagnostic: (type, detail) => job.diagnostics!.event(type, detail),
+      });
+      await this.renderTranslatedResult(
+        job,
+        pipeline,
+        result.markdown,
+        resourceDir,
+      );
+      await job.diagnostics?.finish("completed", {
+        saved: true,
+        resumedFrom: sourceDir,
+      });
+    } catch (error) {
+      await job.diagnostics?.event("error", {
+        message: this.errorMessage(error),
+        stack: error?.stack,
+      });
+      await job.diagnostics?.finish("failed", {
+        error: this.errorMessage(error),
+        resumedFrom: sourceDir,
+      });
+      throw error;
+    }
   }
 
   private async saveHTMLFromZip(

@@ -361,3 +361,26 @@ export function fitDisplayMath(document) {
   visit(output);
   return output;
 }
+
+/** Pandoc dollar math cannot close before a digit. Keep the formula boundary explicit. */
+export function normalizeInlineMathDelimiters(markdown) {
+  const protectedRegions =
+    /(^`{3,}[^\n]*\n[\s\S]*?^`{3,}[^\n]*(?:\n|$)|^~{3,}[^\n]*\n[\s\S]*?^~{3,}[^\n]*(?:\n|$)|`+[^`\n]*`+|\$\$[\s\S]*?\$\$)/gm;
+  return markdown
+    .split(protectedRegions)
+    .map((part, index) => {
+      if (index % 2) return part;
+      return part.replace(
+        /(?<![\\$])\$(?!\$)((?:\\.|[^\\$\n])+?)\$(?!\$)/g,
+        (match, body, offset) => {
+          if (
+            body.trim() !== body ||
+            !/\d/.test(part[offset + match.length] || "")
+          )
+            return match;
+          return `\\(${body}\\)`;
+        },
+      );
+    })
+    .join("");
+}

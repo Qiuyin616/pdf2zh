@@ -1,4 +1,4 @@
-/* global Response, setTimeout, URL, TextDecoder */
+/* global Response, setTimeout, clearTimeout, URL, TextDecoder, AbortController, Headers */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -62,7 +62,8 @@ const addonCompiled = ts
     "const renderMarkdownToHTML = () => {}; const renderMarkdownZipToHTML = () => {};",
   )
   .replace('"./semanticPipeline"', '"./semanticPipeline.mjs"')
-  .replace('"./taskDiagnostics"', '"./taskDiagnostics.mjs"');
+  .replace('"./taskDiagnostics"', '"./taskDiagnostics.mjs"')
+  .replace('"./semanticRepair"', '"./semanticRepair.mjs"');
 await writeFile(join(dir, "pdfToMd.mjs"), addonCompiled);
 const { PDFToMarkdownService } = await import(
   pathToFileURL(join(dir, "pdfToMd.mjs"))
@@ -313,6 +314,9 @@ test("Zotero job retains translated checkpoints, full render failure and complet
         { status: 200 },
       );
     service.mainWindow = () => ({
+      AbortController,
+      setTimeout,
+      clearTimeout,
       fetch: async (url) => {
         if (url.endsWith("/chat/completions"))
           return new Response(
@@ -387,4 +391,146 @@ test("group layout markers survive real semantic placeholder restoration", async
   assert.equal(doc.images[0], "![](images/figure-03-2.png){.pdf2md-figure}");
   assert.ok(!doc.text.includes("pdf2md-figure"));
   assert.equal(restoreMarkdown(doc.text, doc, []), source);
+});
+
+test("renders in Zotero sandbox using window APIs when global AbortController is absent", async () => {
+  const windowRuntime = { AbortController, setTimeout, clearTimeout };
+  const original = globalThis.AbortController;
+  const pipeline = new SemanticPipeline({
+    ...options,
+    renderRuntime: windowRuntime,
+    fetchImpl: async () => new Response("%PDF-test"),
+  });
+  try {
+    globalThis.AbortController = undefined;
+    const bytes = await pipeline.renderMarkdown(
+      "正文",
+      "title",
+      "/tmp",
+      "http://test",
+    );
+    assert.equal(new TextDecoder().decode(bytes), "%PDF-test");
+  } finally {
+    globalThis.AbortController = original;
+  }
+});
+
+test("repeated formula references are all restored, leaving no internal tokens in the PDF input", async () => {
+  const { protectMarkdown, restoreMarkdown } = await import(
+    pathToFileURL(join(dir, "semanticRepair.mjs"))
+  );
+  const doc = protectMarkdown(String.raw`$\mu$Si and $Li_{2}O$`);
+  const restored = restoreMarkdown(
+    "[[MATH001]]Si and [[MATH001]]Si, [[MATH002]] and [[MATH002]]",
+    doc,
+    [],
+  );
+  assert.equal(
+    restored,
+    String.raw`$\mu$Si and $\mu$Si, $Li_{2}O$ and $Li_{2}O$`,
+  );
+  assert.doesNotMatch(restored, /\[\[MATH/);
+});
+
+test("missing AbortController still renders and enforces a deadline through response body reading", async () => {
+  const runtime = { setTimeout, clearTimeout };
+  const success = new SemanticPipeline({
+    ...options,
+    renderRuntime: runtime,
+    fetchImpl: async () => new Response("%PDF-test"),
+  });
+  assert.equal(
+    new TextDecoder().decode(
+      await success.renderMarkdown("x", "t", "/tmp", "http://test"),
+    ),
+    "%PDF-test",
+  );
+  const stalled = new SemanticPipeline({
+    ...options,
+    renderRuntime: runtime,
+    renderTimeoutMs: 25,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      arrayBuffer: async () => new Promise(() => {}),
+    }),
+  });
+  await assert.rejects(
+    stalled.renderMarkdown("x", "t", "/tmp", "http://test"),
+    /渲染超时/,
+  );
+});
+
+test("retry resumes a saved translation through rendering and import without an AI request", async () => {
+  const { protectMarkdown } = await import(
+    pathToFileURL(join(dir, "semanticRepair.mjs"))
+  );
+  const root = join(dir, "recovery-jobs");
+  globalThis.Zotero.getTempDirectory = () => ({ path: root });
+  globalThis.PathUtils.filename = (path) => path.split("/").at(-1);
+  globalThis.IOUtils.getChildren = async (path) =>
+    (await readdir(path)).map((name) => join(path, name));
+  globalThis.IOUtils.exists = async (path) => {
+    try {
+      await stat(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const sourceDir = join(root, "pdftomd-logs", "L1-SAVED-100");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(
+    join(sourceDir, "task.json"),
+    JSON.stringify({ attachmentKey: "SAVED", semantic: true }),
+  );
+  const protectedDoc = protectMarkdown(String.raw`正文 $\mu$。`);
+  await writeFile(
+    join(sourceDir, "translation-result.json"),
+    JSON.stringify({
+      protectedDoc,
+      protectedMarkdown: protectedDoc.text,
+      repairs: [],
+    }),
+  );
+  const job = {
+    att: { key: "SAVED" },
+    parent: null,
+    path: "source.pdf",
+    pdfName: "source.pdf",
+    outputName: "article.md",
+    dataId: "L1-SAVED",
+    semantic: true,
+    outputFormat: "markdown",
+  };
+  const calls = [];
+  const service = new PDFToMarkdownService();
+  service.mainWindow = () => ({
+    setTimeout,
+    clearTimeout,
+    fetch: async (url, opts) => {
+      calls.push(url);
+      assert.equal(JSON.parse(opts.body).resourceDir, sourceDir);
+      assert.equal(JSON.parse(opts.body).markdown, String.raw`正文 $\mu$。`);
+      return new Response("%PDF-test");
+    },
+  });
+  service.setLine = () => {};
+  let imported;
+  service.importAttachment = async (target, path) => {
+    imported = path;
+    assert.equal(target.contentType, "application/pdf");
+  };
+  await service.retryRenderJob(job);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].endsWith("/v1/render-markdown"));
+  assert.equal(await readFile(imported, "utf8"), "%PDF-test");
+  assert.equal(
+    JSON.parse(await readFile(join(job.tmpDir, "status.json"), "utf8")).status,
+    "completed",
+  );
+  assert.ok(
+    await globalThis.IOUtils.exists(join(sourceDir, "translation-result.json")),
+  );
 });

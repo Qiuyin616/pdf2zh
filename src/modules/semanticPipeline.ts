@@ -31,6 +31,11 @@ export type SemanticPipelineOptions = {
   fetchImpl?: typeof fetch;
   diagnostic?: (type: string, detail: Record<string, unknown>) => Promise<void>;
   renderTimeoutMs?: number;
+  renderRuntime?: {
+    AbortController?: typeof AbortController;
+    setTimeout: typeof setTimeout;
+    clearTimeout: typeof clearTimeout;
+  };
 };
 
 export type SemanticPipelineResult = {
@@ -303,52 +308,65 @@ export class SemanticPipeline {
   ): Promise<Uint8Array> {
     const url = `${renderServiceUrl.replace(/\/+$/, "")}/v1/render-markdown`;
     const started = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(),
-      this.options.renderTimeoutMs,
-    );
+    const runtime = this.options.renderRuntime || globalThis;
+    const controller = runtime.AbortController
+      ? new runtime.AbortController()
+      : undefined;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = runtime.setTimeout(() => {
+        timedOut = true;
+        controller?.abort();
+        reject(new Error(`PDF 渲染超时（${this.options.renderTimeoutMs} ms）`));
+      }, this.options.renderTimeoutMs);
+    });
     try {
-      const response = await this.fetchImpl(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markdown, title, resourceDir }),
-        signal: controller.signal,
-      });
-      const metadata = {
-        status: response.status,
-        contentType: response.headers.get("content-type"),
-        mode: response.headers.get("x-render-mode"),
-        fallbackCount: response.headers.get("x-render-fallback-count"),
-        warningCount: response.headers.get("x-render-warning-count"),
-        missingGlyphCount: response.headers.get("x-render-missing-glyph-count"),
-        diagnosticsDir: decodeURIComponent(
-          response.headers.get("x-render-diagnostics-dir") || "",
-        ),
-      };
-      if (!response.ok) {
-        const raw = await response.text();
-        await this.record("render.response", { ...metadata, body: raw });
-        let detail = raw;
-        try {
-          detail = JSON.parse(raw)?.error || raw;
-        } catch {
-          // Keep non-JSON error responses as evidence too.
+      const request = async () => {
+        const response = await this.fetchImpl(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ markdown, title, resourceDir }),
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+        const metadata = {
+          status: response.status,
+          contentType: response.headers.get("content-type"),
+          mode: response.headers.get("x-render-mode"),
+          fallbackCount: response.headers.get("x-render-fallback-count"),
+          warningCount: response.headers.get("x-render-warning-count"),
+          missingGlyphCount: response.headers.get(
+            "x-render-missing-glyph-count",
+          ),
+          diagnosticsDir: decodeURIComponent(
+            response.headers.get("x-render-diagnostics-dir") || "",
+          ),
+        };
+        if (!response.ok) {
+          const raw = await response.text();
+          await this.record("render.response", { ...metadata, body: raw });
+          let detail = raw;
+          try {
+            detail = JSON.parse(raw)?.error || raw;
+          } catch {
+            // Keep non-JSON error responses as evidence too.
+          }
+          throw new Error(`render service HTTP ${response.status}: ${detail}`);
         }
-        throw new Error(`render service HTTP ${response.status}: ${detail}`);
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      await this.record("render.response", {
-        ...metadata,
-        bytes: bytes.length,
-        elapsedMs: Date.now() - started,
-      });
-      if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
-        throw new Error("渲染服务返回成功状态，但内容不是 PDF");
-      }
-      return bytes;
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        await this.record("render.response", {
+          ...metadata,
+          bytes: bytes.length,
+          elapsedMs: Date.now() - started,
+        });
+        if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
+          throw new Error("渲染服务返回成功状态，但内容不是 PDF");
+        }
+        return bytes;
+      };
+      return await Promise.race([request(), timeout]);
     } catch (error) {
-      const message = controller.signal.aborted
+      const message = timedOut
         ? `PDF 渲染超时（${this.options.renderTimeoutMs} ms）`
         : String(error instanceof Error ? error.message : error);
       await this.record("render.error", {
@@ -357,7 +375,7 @@ export class SemanticPipeline {
       });
       throw new Error(message, { cause: error });
     } finally {
-      clearTimeout(timer);
+      runtime.clearTimeout(timer!);
     }
   }
 
