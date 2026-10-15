@@ -58,7 +58,21 @@ after(async () => {
   }
 });
 
-async function render(markdown) {
+async function pdfBoxes(diagnostics) {
+  const child = spawn("pdftotext", [
+    "-bbox-layout",
+    join(diagnostics, "document.pdf"),
+    "-",
+  ]);
+  let xml = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => (xml += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 0);
+  return xml;
+}
+
+async function render(markdown, verify = async () => {}) {
   const response = await fetch(base + "/v1/render-markdown", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -98,6 +112,7 @@ async function render(markdown) {
         typeof record.stderr === "string",
     ),
   );
+  await verify(diagnostics, records);
   await rm(diagnostics, { recursive: true, force: true });
   return response;
 }
@@ -166,4 +181,88 @@ test("math immediately followed by digits renders without fallback", async () =>
     String.raw`在半电池中，研究了约$\sim$1.2 mg cm$^{-2}$质量负载，以及$\sim$3380 mAh g$^{-1}$的容量。`,
   );
   assert.equal(result.headers.get("x-render-mode"), "normal");
+});
+
+test("numbered formulas in HTML tables stay inside the page without losing content", async () => {
+  const formulas = Array.from(
+    { length: 19 },
+    (_, i) =>
+      String.raw`$D_{${i}} = D_s \left(1 - \frac{c_n}{c_{n,\max}}\right) \frac{F}{RT}$ (${i + 1})`,
+  ).join(" ");
+  const response = await render(
+    `<table><tr><th>Electrochemical physics</th><th>Governing equations</th></tr><tr><td>Solid phase mass conservation</td><td>${formulas}</td></tr></table>`,
+    async (diagnostics) => {
+      const xml = await pdfBoxes(diagnostics);
+      const pages = [
+        ...xml.matchAll(
+          /<page\b[^>]*width="([\d.]+)"[^>]*>([\s\S]*?)<\/page>/g,
+        ),
+      ];
+      assert.ok(pages.length);
+      for (const [, width, content] of pages) {
+        for (const [, right] of content.matchAll(
+          /<word\b[^>]*xMax="([\d.-]+)"/g,
+        )) {
+          assert.ok(
+            Number(right) <= Number(width) + 1,
+            `table exceeds page: ${right} > ${width}`,
+          );
+        }
+      }
+      for (let i = 1; i <= 19; i++)
+        assert.ok(xml.includes(`(${i})`), `missing equation ${i}`);
+    },
+  );
+  assert.equal(response.headers.get("x-render-mode"), "normal");
+});
+
+test("wide tables paginate in landscape and repeat their native headers", async () => {
+  const header = Array.from(
+    { length: 8 },
+    (_, i) => `<th>Header${i}</th>`,
+  ).join("");
+  const rows = Array.from(
+    { length: 70 },
+    (_, i) =>
+      `<tr>${Array.from({ length: 8 }, (_, j) => `<td>R${i}C${j}</td>`).join("")}</tr>`,
+  ).join("");
+  const response = await render(
+    `<table><tr>${header}</tr>${rows}</table>`,
+    async (diagnostics) => {
+      const xml = await pdfBoxes(diagnostics);
+      const layout = JSON.parse(
+        await readFile(join(diagnostics, "layout.json"), "utf8"),
+      );
+      assert.ok(layout.pageCount >= 2);
+      assert.ok(layout.pageSizes.every(({ width, height }) => width > height));
+      assert.ok((xml.match(/Header0/g) || []).length >= 2);
+      assert.ok(xml.includes("R69C7"));
+    },
+  );
+  assert.equal(response.headers.get("x-render-mode"), "normal");
+});
+
+test("page clipping is an error, not a successful compatibility fallback", async () => {
+  const response = await fetch(base + "/v1/render-markdown", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      markdown: String.raw`\noindent\hspace*{535pt}W`,
+    }),
+  });
+  assert.equal(response.status, 500);
+  assert.match((await response.json()).error, /超出页面边界/);
+  const diagnostics = decodeURIComponent(
+    response.headers.get("x-render-diagnostics-dir"),
+  );
+  assert.ok(diagnostics.includes("zotero-semantic-render-"));
+  const status = JSON.parse(
+    await readFile(join(diagnostics, "status.json"), "utf8"),
+  );
+  assert.equal(status.status, "failed");
+  const layout = JSON.parse(
+    await readFile(join(diagnostics, "layout.json"), "utf8"),
+  );
+  assert.ok(layout.overflow.length > 0);
+  await rm(diagnostics, { recursive: true, force: true });
 });

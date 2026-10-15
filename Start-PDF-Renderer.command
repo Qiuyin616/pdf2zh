@@ -37,6 +37,8 @@ esac
 command -v node >/dev/null 2>&1 || fail "Node.js is missing. Install Node.js first."
 command -v "$PANDOC" >/dev/null 2>&1 || fail "Pandoc is missing: $PANDOC"
 command -v xelatex >/dev/null 2>&1 || fail "XeLaTeX is missing. Install a TeX distribution with Chinese support."
+command -v pdftotext >/dev/null 2>&1 || fail "pdftotext is missing. Install Poppler for PDF layout validation."
+command -v pdfinfo >/dev/null 2>&1 || fail "pdfinfo is missing. Install Poppler for PDF layout validation."
 command -v kpsewhich >/dev/null 2>&1 || fail "kpsewhich is missing. Check your TeX installation."
 [ -n "$(kpsewhich ctexart.cls)" ] || fail "ctexart.cls is missing. Install the ctex package."
 

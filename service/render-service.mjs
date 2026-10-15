@@ -9,6 +9,8 @@ import { spawn } from "node:child_process";
 import { setTimeout, clearTimeout } from "node:timers";
 import { renderCompatible } from "./render-compatibility.mjs";
 import { prepareFigures, layoutFigureBlocks } from "./figure-layout.mjs";
+import { layoutTables, tablePreamble } from "./table-layout.mjs";
+import { inspectPdfLayout } from "./pdf-layout.mjs";
 import {
   normalizeMathDocument,
   normalizeInlineMathDelimiters,
@@ -115,7 +117,7 @@ async function render(payload) {
       mathTemplate((await execute(pandoc, ["-D", "latex"], dir)).stdout),
       "utf8",
     );
-    await writeFile(headerPath, mathPreamble, "utf8");
+    await writeFile(headerPath, mathPreamble + "\n" + tablePreamble, "utf8");
     const resourcePath = String(payload.resourceDir || dir);
     const reader =
       "markdown+tex_math_dollars+tex_math_single_backslash+raw_tex";
@@ -157,8 +159,8 @@ async function render(payload) {
     const result = await renderCompatible(payload.markdown, {
       parse,
       compile: async ({ markdown, document }) => {
-        const prepared = layoutFigureBlocks(
-          document || (await parse(markdown)),
+        const prepared = layoutTables(
+          layoutFigureBlocks(document || (await parse(markdown))),
         );
         await diagnostic("compile.input", { document: prepared });
         await rm(pdfPath, { force: true });
@@ -198,6 +200,31 @@ async function render(payload) {
         };
       },
     });
+    // Validate only the selected final PDF: layout failures must not turn
+    // otherwise valid formulas into literal source through compatibility probes.
+    // A later failed probe may have removed/overwritten document.pdf.
+    await writeFile(pdfPath, result.pdf.data);
+    const boxes = await execute(
+      "pdftotext",
+      ["-bbox-layout", pdfPath, "-"],
+      dir,
+    );
+    const pageCount = (boxes.stdout.match(/<page\b/g) || []).length;
+    if (!pageCount) throw new Error("PDF 版面检查未读取到页面");
+    const pageInfo = await execute(
+      "pdfinfo",
+      ["-f", "1", "-l", String(pageCount), pdfPath],
+      dir,
+    );
+    const layout = inspectPdfLayout(boxes.stdout, pageInfo.stdout);
+    await writeFile(join(dir, "layout.json"), JSON.stringify(layout, null, 2));
+    await diagnostic("layout.validation", layout);
+    if (layout.overflow.length) {
+      const pages = [...new Set(layout.overflow.map((item) => item.page))];
+      throw new Error(
+        `PDF 内容超出页面边界（第 ${pages.join("、")} 页），请查看渲染日志`,
+      );
+    }
     await writeFile(
       join(dir, "status.json"),
       JSON.stringify(
@@ -207,6 +234,7 @@ async function render(payload) {
           fallbackCount: result.fallbackCount,
           warningCount: result.pdf.warningCount,
           missingGlyphCount: result.pdf.missingGlyphCount,
+          layout,
         },
         null,
         2,
@@ -217,6 +245,7 @@ async function render(payload) {
       pdf: result.pdf.data,
       warningCount: result.pdf.warningCount,
       missingGlyphCount: result.pdf.missingGlyphCount,
+      layoutWarningCount: layout.marginWarningCount,
       diagnosticsDir: dir,
     };
   } catch (error) {
@@ -242,9 +271,17 @@ const server = createServer(async (req, res) => {
     try {
       await run(pandoc, ["--version"], tmpdir());
       await run("xelatex", ["--version"], tmpdir());
+      await run("pdftotext", ["-v"], tmpdir());
+      await run("pdfinfo", ["-v"], tmpdir());
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
-        JSON.stringify({ status: "ok", diagnostics: true, figureLayout: true }),
+        JSON.stringify({
+          status: "ok",
+          diagnostics: true,
+          figureLayout: true,
+          tableLayout: true,
+          layoutValidation: true,
+        }),
       );
     } catch (error) {
       res.writeHead(503, { "content-type": "application/json" });
@@ -276,6 +313,7 @@ const server = createServer(async (req, res) => {
       fallbackCount,
       warningCount,
       missingGlyphCount,
+      layoutWarningCount,
       diagnosticsDir,
     } = await render(payload);
     res.writeHead(200, {
@@ -285,6 +323,7 @@ const server = createServer(async (req, res) => {
       "x-render-fallback-count": fallbackCount,
       "x-render-warning-count": warningCount,
       "x-render-missing-glyph-count": missingGlyphCount,
+      "x-render-layout-warning-count": layoutWarningCount,
       "x-render-diagnostics-dir": encodeURIComponent(diagnosticsDir),
     });
     res.end(pdf);

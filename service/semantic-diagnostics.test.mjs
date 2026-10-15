@@ -11,7 +11,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import ts from "typescript";
@@ -468,7 +468,7 @@ test("retry resumes a saved translation through rendering and import without an 
   );
   const root = join(dir, "recovery-jobs");
   globalThis.Zotero.getTempDirectory = () => ({ path: root });
-  globalThis.PathUtils.filename = (path) => path.split("/").at(-1);
+  globalThis.PathUtils.filename = basename;
   globalThis.IOUtils.getChildren = async (path) =>
     (await readdir(path)).map((name) => join(path, name));
   globalThis.IOUtils.exists = async (path) => {

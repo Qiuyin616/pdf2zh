@@ -11,6 +11,10 @@ if errorlevel 1 goto missing_node
 if errorlevel 1 goto missing_pandoc
 xelatex --version >nul 2>nul
 if errorlevel 1 goto missing_tex
+pdftotext -v >nul 2>nul
+if errorlevel 1 goto missing_poppler
+pdfinfo -v >nul 2>nul
+if errorlevel 1 goto missing_poppler
 set "CTEX="
 for /f "delims=" %%F in ('kpsewhich ctexart.cls 2^>nul') do set "CTEX=%%F"
 if not defined CTEX goto missing_tex
@@ -35,6 +39,9 @@ echo ERROR: Install XeLaTeX and ctexart using a full TeX Live distribution.
 goto failed
 :missing_script
 echo ERROR: Download the complete repository, including the service directory.
+goto failed
+:missing_poppler
+echo ERROR: Install Poppler and add pdftotext and pdfinfo to PATH for PDF layout validation.
 :failed
 popd
 pause

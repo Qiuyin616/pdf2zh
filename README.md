@@ -48,12 +48,13 @@ cd pdf2zh
 
 入口是 `service/render-service.mjs`，需保留整个 `service` 目录，包括 `render-compatibility.mjs` 和 `math-normalization.mjs`。服务仅使用 Node.js 内置模块，单独运行它不需要 `npm install`，但需要以下系统依赖：
 
-| 依赖            | 用途与安装                                                                                                  | 检查命令                           |
-| --------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| Node.js         | 安装 [Node.js LTS](https://nodejs.org/en/download)，运行 HTTP 服务                                          | `node --version`                   |
-| Pandoc          | 按 [官方说明](https://pandoc.org/installing.html) 安装，转换 Markdown                                       | `pandoc --version`                 |
-| XeLaTeX         | macOS 安装 [MacTeX](https://tug.org/mactex/)，Windows 安装 [TeX Live](https://tug.org/texlive/windows.html) | `xelatex --version`                |
-| ctex / 中文字体 | 提供 `ctexart` 中文排版，完整 TeX 发行版通常已包含                                                          | `kpsewhich ctexart.cls` 应返回路径 |
+| 依赖            | 用途与安装                                                                                                              | 检查命令                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| Node.js         | 安装 [Node.js LTS](https://nodejs.org/en/download)，运行 HTTP 服务                                                      | `node --version`                   |
+| Pandoc          | 按 [官方说明](https://pandoc.org/installing.html) 安装，转换 Markdown                                                   | `pandoc --version`                 |
+| XeLaTeX         | macOS 安装 [MacTeX](https://tug.org/mactex/)，Windows 安装 [TeX Live](https://tug.org/texlive/windows.html)             | `xelatex --version`                |
+| ctex / 中文字体 | 提供 `ctexart` 中文排版，完整 TeX 发行版通常已包含                                                                      | `kpsewhich ctexart.cls` 应返回路径 |
+| Poppler         | 使用 `pdftotext` 检查输出 PDF 的文字边界；macOS 可通过 Homebrew 安装 `poppler`，Windows 将 Poppler 的 bin 目录加入 PATH | `pdftotext -v`                     |
 
 首次安装推荐完整 TeX 发行版，体积较大但缺包排查较少；最小安装需要自行补齐 ctex、字体及 Pandoc 模板依赖。Linux 可通过系统包管理器安装 Node.js、Pandoc、XeTeX 和中文 TeX 支持，再执行上述检查。
 
@@ -214,6 +215,14 @@ Issue 只提交脱敏的版本、阶段和最小复现，不提交 Key、Token�
 裁图需要 Poppler 的 `pdfinfo` 和 `pdftoppm` 在 PATH 中；macOS 启动脚本可复用已安装 Codex 的本机 Poppler。缺少布局文件、图注无法唯一匹配、区域含正文/表格或裁图失败时保留原图片并在 `figures.json` 写出原因，不猜测拼图。旧版服务不支持组图接口，需要更新并重启服务。
 
 日志增加 `figures.json`（每张整图的页码、裁取框、来源碎图、图注与待核对项）、`prepared-source.md`（进入翻译前的组图版本）和 `images/figure-*.png`。原始 Markdown 与 ZIP 保留，可以回溯。
+
+### 表格排版与页面边界检查
+
+PDF 渲染会为表格设置正文范围内的相对列宽，保留已有列宽比例、合并单元格和原生表头。两列表格右侧连续的编号公式会按公式拆成续行，允许长表跨页；混有解释文字的段落不会按公式强行拆分。表内公式按单元格宽度局部缩放，编号预留空间；至少八列的独立表格使用单独的横向页面。不会将整张长表缩成一张不可分页的图片。
+
+渲染后通过 `pdftotext -bbox-layout` 检查可提取文字的坐标，确认越过页面边界时返回错误并保留 PDF、`layout.json` 与诊断日志，不导入为成功结果。进入页边距但未越过纸张的文字记录为版面警告。该检查不能发现所有文字重叠、图片裁切或完全落在页面外而未被提取的内容，仍需抽查版面。
+
+更新后重启渲染服务；`GET /health` 返回 `tableLayout: true` 与 `layoutValidation: true` 表示新流程已启用。已有任务可通过右键菜单 **重试渲染（使用已保存译文）** 重新生成，不需要再次调用翻译服务。
 
 ### 本机临时任务日志
 

@@ -335,6 +335,9 @@ export class SemanticPipeline {
           mode: response.headers.get("x-render-mode"),
           fallbackCount: response.headers.get("x-render-fallback-count"),
           warningCount: response.headers.get("x-render-warning-count"),
+          layoutWarningCount: response.headers.get(
+            "x-render-layout-warning-count",
+          ),
           missingGlyphCount: response.headers.get(
             "x-render-missing-glyph-count",
           ),
